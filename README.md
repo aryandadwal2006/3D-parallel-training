@@ -10,6 +10,6 @@ A minimal PyTorch framework using a three-dimensional process mesh.
 - Optional C++/pybind11 NCCL binding with a PyTorch distributed fallback.
 
 ## Run
-`DP=1 TP=1 ./launch.sh --steps 10`
+`DP=1 TP=1 bash launch.sh --steps 10`
 `python setup.py build_ext --inplace` builds the native operation.
-`srun --ntasks-per-node=1 ./launch_slurm.sh --dp 2 --pp 2 --tp 1` runs under Slurm.
+`GPUS_PER_NODE=2 srun -N 2 --ntasks-per-node=1 bash launch_slurm.sh --dp 2 --pp 2 --tp 1` runs under Slurm.
