@@ -7,10 +7,15 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
+try:
+    import nccl_ops
+except ImportError:
+    nccl_ops = None
+
 
 class Zero3LinearFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, weight_shard, weight_shape, dp_group, dp_size):
+    def forward(ctx, x, weight_shard, weight_shape, dp_group, dp_size, native_enabled):
         if dp_size == 1:
             weight = weight_shard.view(weight_shape)
         else:
@@ -21,6 +26,7 @@ class Zero3LinearFunction(torch.autograd.Function):
         ctx.weight_shape = weight_shape
         ctx.dp_group = dp_group
         ctx.dp_size = dp_size
+        ctx.native_enabled = native_enabled
         return F.linear(x, weight)
 
     @staticmethod
@@ -38,21 +44,27 @@ class Zero3LinearFunction(torch.autograd.Function):
             grad_input = grad_output.matmul(weight)
         else:
             grad_weight_shard = torch.empty_like(weight_shard)
-            work = dist.reduce_scatter_tensor(
-                grad_weight_shard,
-                grad_weight.reshape(-1),
-                op=dist.ReduceOp.SUM,
-                group=ctx.dp_group,
-                async_op=True,
-            )
-            grad_input = grad_output.matmul(weight)
-            work.wait()
+            if ctx.native_enabled:
+                stream_ptr = nccl_ops.reduce_scatter_async(grad_weight, grad_weight_shard)
+                grad_input = grad_output.matmul(weight)
+                comm_stream = torch.cuda.ExternalStream(stream_ptr, device=x.device)
+                torch.cuda.current_stream(x.device).wait_stream(comm_stream)
+            else:
+                work = dist.reduce_scatter_tensor(
+                    grad_weight_shard,
+                    grad_weight.reshape(-1),
+                    op=dist.ReduceOp.SUM,
+                    group=ctx.dp_group,
+                    async_op=True,
+                )
+                grad_input = grad_output.matmul(weight)
+                work.wait()
             grad_weight_shard.div_(ctx.dp_size)
-        return grad_input, grad_weight_shard, None, None, None
+        return grad_input, grad_weight_shard, None, None, None, None
 
 
 class Zero3Linear(nn.Module):
-    def __init__(self, local_weight, dp_group, dp_size):
+    def __init__(self, local_weight, dp_group, dp_size, native_enabled):
         super().__init__()
         if local_weight.numel() % dp_size:
             raise ValueError("Weight size must be divisible by the data-parallel size")
@@ -60,10 +72,11 @@ class Zero3Linear(nn.Module):
         self.weight = nn.Parameter(local_weight.reshape(-1).chunk(dp_size)[dist.get_rank(dp_group)].contiguous())
         self.dp_group = dp_group
         self.dp_size = dp_size
+        self.native_enabled = native_enabled
 
     def forward(self, x):
         return Zero3LinearFunction.apply(
-            x, self.weight, self.weight_shape, self.dp_group, self.dp_size
+            x, self.weight, self.weight_shape, self.dp_group, self.dp_size, self.native_enabled
         )
 
 
@@ -194,7 +207,14 @@ def main():
                 device,
             )
 
-        layer = Zero3Linear(local_weight, dp_group, args.dp).to(device)
+        native_enabled = nccl_ops is not None and args.dp > 1
+        if native_enabled:
+            dp_rank = dist.get_rank(dp_group)
+            unique_ids = [nccl_ops.get_unique_id() if dp_rank == 0 else None]
+            dist.broadcast_object_list(unique_ids, src=dp_ranks[0], group=dp_group)
+            nccl_ops.init(unique_ids[0], dp_rank, args.dp, device.index)
+
+        layer = Zero3Linear(local_weight, dp_group, args.dp, native_enabled).to(device)
         optimizer = torch.optim.AdamW(layer.parameters(), lr=args.lr)
         peer = rank_at(data_rank, 1 - pipe_rank, tensor_rank, args.pp, args.tp)
 
@@ -234,6 +254,8 @@ def main():
 
             optimizer.step()
     finally:
+        if nccl_ops is not None:
+            nccl_ops.close()
         dist.destroy_process_group()
 
 
