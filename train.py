@@ -160,8 +160,6 @@ def main():
         raise ValueError("This minimal pipeline schedule requires --pp 2")
     if args.hidden_size % args.tp:
         raise ValueError("hidden-size must be divisible by tp")
-    if args.input_size % args.tp or args.output_size % args.tp:
-        raise ValueError("input-size and output-size must be divisible by tp")
 
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
