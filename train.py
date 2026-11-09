@@ -253,6 +253,7 @@ def main():
             optimizer.step()
     finally:
         if nccl_ops is not None:
+            torch.cuda.synchronize()
             nccl_ops.close()
         dist.destroy_process_group()
 
