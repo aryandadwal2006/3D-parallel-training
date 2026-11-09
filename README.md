@@ -12,3 +12,4 @@ A minimal PyTorch framework using a three-dimensional process mesh.
 ## Run
 `DP=1 TP=1 ./launch.sh --steps 10`
 `python setup.py build_ext --inplace` builds the native operation.
+` srun --ntasks-per-node=1 ./launch_slurm.sh --dp 2 --pp 2 --tp 1` runs under Slurm.
