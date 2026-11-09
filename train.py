@@ -163,15 +163,15 @@ def main():
     if args.input_size % args.tp or args.output_size % args.tp:
         raise ValueError("input-size and output-size must be divisible by tp")
 
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
+    device = torch.device("cuda", local_rank)
     dist.init_process_group("nccl")
     try:
         world_size = dist.get_world_size()
         if world_size != args.dp * args.pp * args.tp:
             raise ValueError("World size must equal dp * pp * tp")
 
-        local_rank = int(os.environ["LOCAL_RANK"])
-        torch.cuda.set_device(local_rank)
-        device = torch.device("cuda", local_rank)
         (
             data_rank,
             pipe_rank,
